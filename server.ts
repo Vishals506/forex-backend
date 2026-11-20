@@ -1,0 +1,204 @@
+import dotenv from 'dotenv'; // Trigger restart
+// Load environment variables before anything else!
+dotenv.config({ path: './.env' }); // Since this is now in the backend folder, the path is './.env'
+
+import express from 'express';
+import cors from 'cors';
+import { connectDatabase } from './src/config/database';
+import authRoutes from './src/routes/authRoutes';
+import healthRoutes from './src/routes/healthRoutes';
+import { errorHandler } from './src/middleware/errorHandler';
+import http from 'http';
+import { SocketServer } from './src/services/socketServer';
+import { MarketService } from './src/services/market.service';
+import { PriceEngine } from './src/services/priceEngine';
+import walletRoutes from './src/routes/walletRoutes';
+import depositRoutes from './src/routes/depositRoutes';
+import withdrawalRoutes from './src/routes/withdrawalRoutes';
+import kycRoutes from './src/routes/kycRoutes';
+import tradingRoutes from './src/routes/tradingRoutes';
+import copyTradingRoutes from './src/routes/copyTradingRoutes';
+import watchlistRoutes from './src/routes/watchlistRoutes';
+import alertRoutes from './src/routes/alertRoutes';
+import adminRoutes from './src/routes/adminRoutes';
+import paymentSettingsRoutes from './src/routes/paymentSettingsRoutes';
+import marketRoutes from './src/routes/market.routes';
+import newsRoutes from './src/routes/newsRoutes';
+import economicCalendarRoutes from './src/routes/economicCalendarRoutes';
+import orderRoutes from './src/routes/orderRoutes';
+import profileRoutes from './src/routes/profileRoutes';
+import transactionRoutes from './src/routes/transactionRoutes';
+import exchangeRateRoutes from './src/routes/exchangeRateRoutes';
+import { initDefaultRate } from './src/controllers/exchangeRateController';
+import { protect } from './src/middleware/authMiddleware';
+import { getClosedPositions } from './src/controllers/tradingController';
+
+import { config } from './src/config/env';
+
+console.log("MONGO URI =", config.mongoUri ? config.mongoUri.replace(/:([^@]+)@/, ':****@') : 'NOT_SET');
+
+const app = express();
+const defaultAllowedOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'https://www.novaf.in',
+  'https://novaf.in',
+  'https://www.novaf.online',
+  'https://novaf.online',
+  'https://forex-factory-admin-panel.vercel.app',
+  'https://forex-factory-admin-panel.vercel.app/',
+  'https://forex-backend-iem1.onrender.com',
+  'https://forex-backend-63xj.onrender.com',
+  'https://forex-frontend-2dmzc8t8z-forextradebio-boops-projects.vercel.app'
+];
+const envOrigins = (process.env.FRONTEND_URL || process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...envOrigins])];
+const isAllowedOrigin = (origin: string | undefined) => {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  if (/\.vercel\.app$/i.test(origin) || /\.onrender\.com$/i.test(origin)) return true;
+  return false;
+};
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn(`[CORS] Rejected Origin: ${origin}. Allowed origins: ${allowedOrigins.join(', ')}`);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+}));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ limit: '100mb', extended: true }));
+
+app.use((req, res, next) => {
+  if (process.env.REQUEST_LOGGING === 'true') {
+    console.log(`[REQUEST] ${req.method} ${req.url}`);
+  }
+  next();
+});
+
+// Serve uploaded files statically
+import path from 'path';
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+app.use('/api/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
+// Register API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/health', healthRoutes);
+app.use('/api/wallet', walletRoutes);
+app.use('/api/deposits', depositRoutes);
+app.use('/api/withdrawals', withdrawalRoutes);
+app.use('/api/transactions', transactionRoutes);
+app.use('/api/kyc', kycRoutes);
+app.use('/api/trading', tradingRoutes);
+app.get('/api/trading/closed-positions', protect, getClosedPositions);
+app.get('/api/trading/positions/closed', protect, getClosedPositions);
+app.use('/api/copy-trading', copyTradingRoutes);
+app.use('/api/watchlist', watchlistRoutes);
+app.use('/api/alerts', alertRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/payment-settings', paymentSettingsRoutes);
+app.use('/api/market', marketRoutes);
+app.use('/api/news', newsRoutes);
+app.use('/api/economic-calendar', economicCalendarRoutes);
+app.use('/api/orders', orderRoutes);
+app.use('/api/profile', profileRoutes);
+app.use('/api/exchange-rates', exchangeRateRoutes);
+
+// Central error handling
+app.use(errorHandler);
+
+const server = http.createServer(app);
+SocketServer.init(server);
+
+import { SymbolSpecification } from './src/engine/SymbolSpecification';
+import { UserModel } from './src/models/User';
+import { WalletModel } from './src/models/Wallet';
+import { KycModel } from './src/models/Kyc';
+import { SettingsModel } from './src/models/Settings';
+import bcrypt from 'bcryptjs';
+
+const seedAdmin = async () => {
+  try {
+    const existingAdmin = await UserModel.findOne({ role: { $regex: /^admin$/i } });
+    if (existingAdmin) {
+      console.log('[Startup] Admin user already exists.');
+      return;
+    }
+
+    const hashedPassword = await bcrypt.hash('Admin@1234', 12);
+    const adminUser = await UserModel.create({
+      username: 'admin@trading.com',
+      fullName: 'Admin User',
+      email: 'admin@trading.com',
+      passwordHash: hashedPassword,
+      role: 'ADMIN',
+      status: 'ACTIVE',
+      kycStatus: 'APPROVED'
+    });
+
+    await WalletModel.create({
+      userId: adminUser._id,
+      balance: 0,
+      equity: 0,
+      margin: 0,
+      freeMargin: 0,
+      pnl: 0,
+    });
+
+    await KycModel.create({
+      userId: adminUser._id,
+      status: 'APPROVED',
+      documents: [],
+    });
+
+    await SettingsModel.create({
+      userId: adminUser._id,
+      theme: 'light',
+      notifications: true,
+      language: 'en',
+    });
+
+    console.log('[Startup] Admin user created: admin@trading.com / Admin@1234');
+  } catch (error) {
+    console.error('[Startup] Failed to seed admin:', error);
+  }
+};
+
+const start = async () => {
+  await connectDatabase();
+  await initDefaultRate();
+  await seedAdmin();
+  await SymbolSpecification.loadAll();
+  console.log('[Startup] Symbol specifications loaded.');
+  const PORT = Number(process.env.PORT) || 8000;
+
+  try {
+    await MarketService.start();
+    PriceEngine.start();
+
+    server.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error('[Startup] Failed to start market services:', err);
+    // Even if market services fail, we should start the server to allow API endpoints to work
+    server.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT} (Market Services Failed)`);
+    });
+  }
+};
+
+
+start();
